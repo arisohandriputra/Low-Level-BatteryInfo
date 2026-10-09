@@ -261,30 +261,116 @@ static void DumpBytes(FILE *out, const char *label, const void *data, DWORD size
     }
 }
 
+static void NormalizeChemistryCode(const BYTE chemistry[4], char normalized[5])
+{
+    DWORD i;
+    DWORD used;
+    BYTE value;
+
+    used = 0;
+    for (i = 0; i < 4; i++) {
+        value = chemistry[i];
+        if (value == 0) {
+            break;
+        }
+        if (value >= 'A' && value <= 'Z') {
+            value = (BYTE)(value - 'A' + 'a');
+        }
+        normalized[used++] = (char)value;
+    }
+
+    while (used > 0 && normalized[used - 1] == ' ') {
+        used--;
+    }
+    normalized[used] = '\0';
+}
+
 static const char *GetChemistryName(const BYTE chemistry[4])
 {
-    if (memcmp(chemistry, "PbAc", 4) == 0) {
+    char code[5];
+    static char rawCode[32];
+    DWORD i;
+    DWORD last;
+    DWORD used;
+    BYTE value;
+
+    NormalizeChemistryCode(chemistry, code);
+
+    if (strcmp(code, "pbac") == 0) {
         return "Lead-acid battery";
     }
-    if (memcmp(chemistry, "LION", 4) == 0 || memcmp(chemistry, "Li-I", 4) == 0) {
+    if (strcmp(code, "lion") == 0 || strcmp(code, "li-i") == 0) {
         return "Lithium-ion battery";
     }
-    if (memcmp(chemistry, "LIPO", 4) == 0 || memcmp(chemistry, "LiPo", 4) == 0) {
+    if (strcmp(code, "lip") == 0 || strcmp(code, "lipo") == 0) {
         return "Lithium-polymer battery";
     }
-    if (memcmp(chemistry, "NiCd", 4) == 0) {
+    if (strcmp(code, "nicd") == 0) {
         return "Nickel-cadmium battery";
     }
-    if (memcmp(chemistry, "NiMH", 4) == 0) {
+    if (strcmp(code, "nimh") == 0) {
         return "Nickel-metal hydride battery";
     }
-    if (memcmp(chemistry, "NiZn", 4) == 0) {
+    if (strcmp(code, "nizn") == 0) {
         return "Nickel-zinc battery";
     }
-    if (memcmp(chemistry, "RAM ", 4) == 0 || memcmp(chemistry, "RAM\0", 4) == 0) {
+    if (strcmp(code, "ram") == 0) {
         return "Rechargeable alkaline-manganese battery";
     }
-    return "Unknown or vendor-specific battery chemistry";
+
+    last = 4;
+    while (last > 0 && (chemistry[last - 1] == 0 || chemistry[last - 1] == ' ')) {
+        last--;
+    }
+
+    used = 0;
+    for (i = 0; i < last; i++) {
+        value = chemistry[i];
+        if (value >= 32 && value <= 126 && value != '\\' && value != '"') {
+            rawCode[used++] = (char)value;
+        } else {
+            rawCode[used++] = '\\';
+            rawCode[used++] = 'x';
+            rawCode[used++] = "0123456789ABCDEF"[(value >> 4) & 0x0F];
+            rawCode[used++] = "0123456789ABCDEF"[value & 0x0F];
+        }
+    }
+
+    if (used == 0) {
+        for (i = 0; i < 4; i++) {
+            value = chemistry[i];
+            rawCode[used++] = '\\';
+            rawCode[used++] = 'x';
+            rawCode[used++] = "0123456789ABCDEF"[(value >> 4) & 0x0F];
+            rawCode[used++] = "0123456789ABCDEF"[value & 0x0F];
+        }
+    }
+    rawCode[used] = '\0';
+    return rawCode;
+}
+
+static void PrintChemistryCode(FILE *out, const char *label, const BYTE chemistry[4])
+{
+    DWORD i;
+    BYTE value;
+
+    fprintf(out, "%s: \"", label);
+    for (i = 0; i < 4; i++) {
+        value = chemistry[i];
+        if (value == '\\' || value == '\"') {
+            fputc('\\', out);
+            fputc((int)value, out);
+        } else if (value >= 32 && value <= 126) {
+            fputc((int)value, out);
+        } else {
+            fprintf(out, "\\x%02X", (unsigned int)value);
+        }
+    }
+    fprintf(out, "\" (bytes:");
+    for (i = 0; i < 4; i++) {
+        fprintf(out, " %02X", (unsigned int)chemistry[i]);
+    }
+    fprintf(out, ")\n");
 }
 
 static void PrintDWORD(FILE *out, const char *label, DWORD value)
@@ -866,6 +952,7 @@ static void PrintBatteryInformationSection(FILE *out, const LLB_BATTERY_RECORD *
                 record->Information.Technology == 1 ? "Secondary rechargeable battery" :
                 "Unknown battery technology");
         fprintf(out, "Battery chemistry: %s\n", GetChemistryName(record->Information.Chemistry));
+        PrintChemistryCode(out, "Battery chemistry code", record->Information.Chemistry);
         fprintf(out, "Capacity units: %s\n",
                 relativeUnits ? "Relative units reported by the driver" : "mWh");
         PrintCapacity(out, "Designed capacity", record->Information.DesignedCapacity, relativeUnits);
@@ -1143,6 +1230,7 @@ static void PrintRawSection(
                   sizeof(record->Information.Chemistry));
         fprintf(out, "Chemistry interpretation: %s\n",
                 GetChemistryName(record->Information.Chemistry));
+        PrintChemistryCode(out, "Chemistry code as received", record->Information.Chemistry);
         fprintf(out, "Technology byte: 0x%02X (%u)\n",
                 (unsigned int)record->Information.Technology,
                 (unsigned int)record->Information.Technology);
@@ -1194,6 +1282,7 @@ static void PrintSelectedFieldValue(FILE *out, const LLB_BATTERY_RECORD *record,
     } else if (strcmp(fieldName, "chemistry") == 0) {
         if (record->InformationAvailable) {
             fprintf(out, "%s: %s\n", GetFieldLabel(fieldName), GetChemistryName(record->Information.Chemistry));
+            PrintChemistryCode(out, "Chemistry code", record->Information.Chemistry);
         } else {
             fprintf(out, "%s: Not reported\n", GetFieldLabel(fieldName));
         }
