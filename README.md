@@ -1,32 +1,6 @@
-# Low-Level Battery Info
-
-Low-Level Battery Info (LLB) is a small Windows command-line program written in C. I made it to check what Windows can report about a laptop battery without using WMI.
-
-LLB uses the Windows battery device interface through SetupAPI and DeviceIoControl. The usual battery information is shown first, and the raw data is kept in a separate section below it.
-
-## What it shows
-
-LLB looks for battery interfaces that Windows makes available. Each one is shown separately as `SLOT #1`, `SLOT #2`, and so on.
-
-Depending on the battery and its driver, the program can show its name, manufacturer, serial number, chemistry, technology, designed capacity, full-charge capacity, current capacity, voltage, charging state, charge or discharge rate, cycle count, manufacturing date, temperature, and estimated remaining time. It also shows other battery fields when the driver provides them.
-
-LLB does not calculate battery health. The charge level is calculated from the current capacity and full-charge capacity reported by the driver. Some fields may be unknown or unavailable on certain laptops.
-
-## Raw data
-
-The `RAW DEVICE DATA` section is shown below the normal information. It contains the details collected while querying each battery, including IOCTL codes, query results, byte counts, returned bytes in hexadecimal and ASCII, and Windows error codes when a request fails. Raw structures and values are shown when they are available.
-
-If a request fails or the driver does not support it, there may be no response bytes to display. LLB reports the result instead of filling in data that was not returned.
-
-## How it works
-
-LLB is written in native C and uses Windows APIs. It finds battery device interfaces with SetupAPI, opens them, and requests information from the Windows battery driver with DeviceIoControl. It does not use WMI, PowerShell, .NET, or third-party runtime libraries.
-
-This is low-level access through the Windows driver interface, not a direct read of SMBus data, embedded-controller registers, or the battery's fuel-gauge chip. What LLB can read depends on the hardware, firmware, and driver.
-
 ## Build
 
-You need Windows and a GCC toolchain such as TDM-GCC or MinGW. Save the source as `llb.c`, open Command Prompt in that folder, and run:
+You need Windows and a GCC toolchain such as TDM-GCC or MinGW. Save the source as `main.c`, open Command Prompt in that folder, and run:
 
 ```bat
 gcc main.c -o llb.exe -lsetupapi
