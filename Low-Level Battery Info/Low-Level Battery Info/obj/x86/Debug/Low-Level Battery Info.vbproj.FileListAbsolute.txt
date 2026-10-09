@@ -1,0 +1,9 @@
+c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\bin\Debug\Low-Level Battery Info.exe
+c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\bin\Debug\Low-Level Battery Info.pdb
+c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\bin\Debug\Low-Level Battery Info.xml
+c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\obj\x86\Debug\Low_Level_Battery_Info.Form1.resources
+c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\obj\x86\Debug\Low_Level_Battery_Info.Resources.resources
+c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\obj\x86\Debug\Low-Level Battery Info.vbproj.GenerateResource.Cache
+c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\obj\x86\Debug\Low-Level Battery Info.exe
+c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\obj\x86\Debug\Low-Level Battery Info.xml
+c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\obj\x86\Debug\Low-Level Battery Info.pdb
