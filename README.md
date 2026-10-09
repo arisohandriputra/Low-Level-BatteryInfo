@@ -29,7 +29,7 @@ This is low-level access through the Windows driver interface, not a direct read
 You need Windows and a GCC toolchain such as TDM-GCC or MinGW. Save the source as `llb.c`, open Command Prompt in that folder, and run:
 
 ```bat
-gcc llb.c -o llb.exe -lsetupapi
+gcc main.c -o llb.exe -lsetupapi
 ```
 
 Then start the program:
