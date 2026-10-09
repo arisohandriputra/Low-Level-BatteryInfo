@@ -82,7 +82,7 @@ LLB keeps the display focused on battery information. Device paths and Windows d
 
 ## Requirements
 
-- Windows with a working battery driver. Windows 7 is the main target for this build.
+- Windows with a working battery driver.
 - TDM-GCC/MinGW or another compatible GCC toolchain for compiling the source.
 - The Windows `SetupAPI` library, which is normally available with the MinGW/TDM-GCC toolchain.
 
