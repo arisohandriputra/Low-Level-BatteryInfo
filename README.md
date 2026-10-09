@@ -4,11 +4,6 @@ A small Windows command-line tool written in C for checking what Windows reports
 
 I wanted something simple that could read battery information without going through WMI, so LLB talks to the Windows battery device interface with native Windows APIs. It shows the readable information first and keeps the byte-level details in a separate **RAW DEVICE DATA** section at the bottom.
 
-**Created by:** Ari Sohandri Putra  
-**GitHub:** https://github.com/arisohandriputra  
-**Program name:** `llb.exe`  
-**Current source version:** 1.1
-
 ## What it does
 
 - Finds battery interfaces exposed by Windows and displays them separately as `SLOT #1`, `SLOT #2`, and so on.
@@ -95,10 +90,10 @@ The program is a console application. When opened normally from Explorer, it is 
 
 ## Build from source
 
-Put `llb.c` in a folder, open Command Prompt in that folder, and run:
+Put `main.c` in a folder, open Command Prompt in that folder, and run:
 
 ```bat
-gcc llb.c -o llb.exe -lsetupapi
+gcc main.c -o llb.exe -lsetupapi
 ```
 
 Then start it:
@@ -254,7 +249,3 @@ Reports can contain a battery serial number, manufacturer details, and a unique 
 **Low-Level Battery Info** is written by **Ari Sohandri Putra**.
 
 GitHub: https://github.com/arisohandriputra
-
-## License
-
-No license file is included with this source at the moment. Add a `LICENSE` file to the repository if you want to specify how other people may use, modify, or redistribute the project.
