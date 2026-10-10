@@ -4,7 +4,7 @@ setlocal
 windres llb.rc -O coff -o llb_resource.o
 if errorlevel 1 goto failed
 
-gcc llb.c llb_resource.o -o llb.exe -lsetupapi
+gcc llb.c llb_resource.o -o llb.exe -lsetupapi -lhid -lhidparse
 if errorlevel 1 goto failed
 
 del llb_resource.o 2>nul
