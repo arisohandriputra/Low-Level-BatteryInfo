@@ -2,6 +2,8 @@
 
 #include <windows.h>
 #include <setupapi.h>
+#include <hidsdi.h>
+#include <hidpi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +17,13 @@
 #define LLB_COPYRIGHT "Copyright (C) Ari Sohandri Putra"
 #define LLB_GITHUB "https://github.com/arisohandriputra"
 #define LLB_MAX_SLOTS 32
+#define LLB_MAX_UPS 16
+#define LLB_MAX_UPS_FEATURE_REPORTS 32
+#define LLB_MAX_UPS_REPORT_BYTES 512
+#define LLB_MAX_UPS_VALUES 128
+#define LLB_HID_POWER_PAGE 0x84
+#define LLB_HID_BATTERY_PAGE 0x85
+#define LLB_HID_UPS_USAGE 0x04
 #define LLB_TEXT_SIZE 2048
 #define LLB_WIDE_STRING_COUNT 256
 #define LLB_UNKNOWN_VALUE 0xFFFFFFFFUL
@@ -144,12 +153,70 @@ typedef struct _LLB_BATTERY_RECORD {
     BOOL EstimatedAvailable;
 } LLB_BATTERY_RECORD;
 
+typedef struct _LLB_UPS_REPORT_DATA {
+    UCHAR ReportId;
+    BOOL Available;
+    DWORD ErrorCode;
+    DWORD BufferLength;
+    BYTE Data[LLB_MAX_UPS_REPORT_BYTES];
+} LLB_UPS_REPORT_DATA;
+
+typedef struct _LLB_UPS_VALUE {
+    USAGE UsagePage;
+    USAGE Usage;
+    USHORT LinkCollection;
+    UCHAR ReportId;
+    DWORD RawValue;
+    LONG ScaledValue;
+    BOOL ScaledAvailable;
+    BOOL IsInputReport;
+    LONG LogicalMin;
+    LONG LogicalMax;
+    ULONG Units;
+    ULONG UnitsExp;
+} LLB_UPS_VALUE;
+
+typedef struct _LLB_UPS_RECORD {
+    DWORD Number;
+    char DevicePath[LLB_TEXT_SIZE];
+    BOOL DevicePathAvailable;
+    BOOL DeviceOpened;
+    DWORD OpenError;
+    BOOL AttributesAvailable;
+    USHORT VendorID;
+    USHORT ProductID;
+    USHORT VersionNumber;
+    char Manufacturer[256];
+    char Product[256];
+    char SerialNumber[256];
+    BOOL CapsAvailable;
+    DWORD CapsError;
+    USAGE UsagePage;
+    USAGE Usage;
+    USHORT InputReportByteLength;
+    USHORT OutputReportByteLength;
+    USHORT FeatureReportByteLength;
+    USHORT NumberInputButtonCaps;
+    USHORT NumberInputValueCaps;
+    USHORT NumberOutputButtonCaps;
+    USHORT NumberOutputValueCaps;
+    USHORT NumberFeatureButtonCaps;
+    USHORT NumberFeatureValueCaps;
+    DWORD InputReportCount;
+    LLB_UPS_REPORT_DATA InputReports[LLB_MAX_UPS_FEATURE_REPORTS];
+    DWORD FeatureReportCount;
+    LLB_UPS_REPORT_DATA FeatureReports[LLB_MAX_UPS_FEATURE_REPORTS];
+    DWORD ValueCount;
+    LLB_UPS_VALUE Values[LLB_MAX_UPS_VALUES];
+} LLB_UPS_RECORD;
+
 typedef struct _LLB_OPTIONS {
     BOOL Once;
     BOOL IncludeRaw;
     BOOL PauseAtEnd;
     BOOL FieldOnly;
     BOOL ListFields;
+    BOOL UpsOnly;
     BOOL HasSlotFilter;
     DWORD SlotFilter;
     char FieldName[64];
@@ -162,6 +229,12 @@ static const GUID LLB_BATTERY_INTERFACE_GUID = {
 };
 
 static volatile sig_atomic_t LLB_StopRequested = 0;
+static LLB_UPS_RECORD LLB_UpsRecords[LLB_MAX_UPS];
+static DWORD LLB_UpsRecordCount = 0;
+static DWORD LLB_UpsInterfaceCount = 0;
+static DWORD LLB_UpsHidInterfacesScanned = 0;
+static DWORD LLB_UpsEnumerationError = ERROR_SUCCESS;
+static BOOL LLB_UpsTruncated = FALSE;
 
 static void HandleSignal(int signalNumber)
 {
@@ -258,6 +331,896 @@ static void DumpBytes(FILE *out, const char *label, const void *data, DWORD size
         }
         fprintf(out, "|\n");
         offset += current;
+    }
+}
+
+static void ConvertHidString(HANDLE device, int stringType, char *destination, size_t destinationSize)
+{
+    WCHAR wideText[256];
+    int converted;
+    BOOL success;
+
+    if (destinationSize == 0) {
+        return;
+    }
+    destination[0] = '\0';
+    memset(wideText, 0, sizeof(wideText));
+    success = FALSE;
+
+    if (stringType == 0) {
+        success = HidD_GetManufacturerString(device, wideText, sizeof(wideText));
+    } else if (stringType == 1) {
+        success = HidD_GetProductString(device, wideText, sizeof(wideText));
+    } else if (stringType == 2) {
+        success = HidD_GetSerialNumberString(device, wideText, sizeof(wideText));
+    }
+
+    if (!success) {
+        return;
+    }
+
+    wideText[(sizeof(wideText) / sizeof(wideText[0])) - 1] = L'\0';
+    converted = WideCharToMultiByte(CP_ACP, 0, wideText, -1,
+                                    destination, (int)destinationSize,
+                                    NULL, NULL);
+    if (converted <= 0) {
+        destination[0] = '\0';
+    } else {
+        destination[destinationSize - 1] = '\0';
+    }
+}
+
+static LLB_UPS_REPORT_DATA *FindUpsFeatureReport(LLB_UPS_RECORD *record, UCHAR reportId)
+{
+    DWORD i;
+    for (i = 0; i < record->FeatureReportCount; i++) {
+        if (record->FeatureReports[i].ReportId == reportId) {
+            return &record->FeatureReports[i];
+        }
+    }
+    return NULL;
+}
+
+static LLB_UPS_REPORT_DATA *FindUpsInputReport(LLB_UPS_RECORD *record, UCHAR reportId)
+{
+    DWORD i;
+    for (i = 0; i < record->InputReportCount; i++) {
+        if (record->InputReports[i].ReportId == reportId) {
+            return &record->InputReports[i];
+        }
+    }
+    return NULL;
+}
+
+static BOOL AddUpsReportId(UCHAR reportIds[], DWORD *reportCount, UCHAR reportId)
+{
+    DWORD i;
+    for (i = 0; i < *reportCount; i++) {
+        if (reportIds[i] == reportId) {
+            return TRUE;
+        }
+    }
+    if (*reportCount >= LLB_MAX_UPS_FEATURE_REPORTS) {
+        return FALSE;
+    }
+    reportIds[*reportCount] = reportId;
+    (*reportCount)++;
+    return TRUE;
+}
+
+static void AddUpsValue(
+    LLB_UPS_RECORD *record,
+    const HIDP_VALUE_CAPS *valueCaps,
+    USAGE usage,
+    DWORD rawValue,
+    LONG scaledValue,
+    BOOL scaledAvailable,
+    BOOL isInputReport)
+{
+    DWORD i;
+    LLB_UPS_VALUE *value;
+
+    for (i = 0; i < record->ValueCount; i++) {
+        value = &record->Values[i];
+        if (value->UsagePage == valueCaps->UsagePage &&
+            value->Usage == usage &&
+            value->ReportId == valueCaps->ReportID &&
+            value->LinkCollection == valueCaps->LinkCollection &&
+            value->IsInputReport == isInputReport) {
+            return;
+        }
+    }
+    if (record->ValueCount >= LLB_MAX_UPS_VALUES) {
+        return;
+    }
+
+    value = &record->Values[record->ValueCount++];
+    memset(value, 0, sizeof(*value));
+    value->UsagePage = valueCaps->UsagePage;
+    value->Usage = usage;
+    value->LinkCollection = valueCaps->LinkCollection;
+    value->ReportId = valueCaps->ReportID;
+    value->RawValue = rawValue;
+    value->ScaledValue = scaledValue;
+    value->ScaledAvailable = scaledAvailable;
+    value->IsInputReport = isInputReport;
+    value->LogicalMin = valueCaps->LogicalMin;
+    value->LogicalMax = valueCaps->LogicalMax;
+    value->Units = valueCaps->Units;
+    value->UnitsExp = valueCaps->UnitsExp;
+}
+
+static void ReadUpsFeatureReports(
+    HANDLE device,
+    PHIDP_PREPARSED_DATA preparsedData,
+    const HIDP_CAPS *caps,
+    LLB_UPS_RECORD *record)
+{
+    PHIDP_VALUE_CAPS valueCaps;
+    PHIDP_BUTTON_CAPS buttonCaps;
+    USHORT valueCapsCount;
+    USHORT actualCaps;
+    USHORT buttonCapsCount;
+    USHORT actualButtonCaps;
+    UCHAR reportIds[LLB_MAX_UPS_FEATURE_REPORTS];
+    DWORD reportIdCount;
+    DWORD i;
+    DWORD j;
+    USAGE usageMin;
+    USAGE usageMax;
+    ULONG rawValue;
+    LONG scaledValue;
+    NTSTATUS status;
+    LLB_UPS_REPORT_DATA *featureReport;
+    size_t allocationSize;
+
+    record->FeatureReportCount = 0;
+    record->ValueCount = 0;
+    if ((caps->NumberFeatureValueCaps == 0 && caps->NumberFeatureButtonCaps == 0) ||
+        caps->FeatureReportByteLength == 0) {
+        return;
+    }
+
+    valueCaps = NULL;
+    actualCaps = 0;
+    if (caps->NumberFeatureValueCaps > 0) {
+        valueCapsCount = caps->NumberFeatureValueCaps;
+        allocationSize = (size_t)valueCapsCount * sizeof(HIDP_VALUE_CAPS);
+        valueCaps = (PHIDP_VALUE_CAPS)calloc(1, allocationSize);
+        if (valueCaps != NULL) {
+            actualCaps = valueCapsCount;
+            status = HidP_GetValueCaps(HidP_Feature, valueCaps, &actualCaps, preparsedData);
+            if (status != HIDP_STATUS_SUCCESS) {
+                free(valueCaps);
+                valueCaps = NULL;
+                actualCaps = 0;
+            }
+        }
+    }
+
+    buttonCaps = NULL;
+    actualButtonCaps = 0;
+    if (caps->NumberFeatureButtonCaps > 0) {
+        buttonCapsCount = caps->NumberFeatureButtonCaps;
+        allocationSize = (size_t)buttonCapsCount * sizeof(HIDP_BUTTON_CAPS);
+        buttonCaps = (PHIDP_BUTTON_CAPS)calloc(1, allocationSize);
+        if (buttonCaps != NULL) {
+            actualButtonCaps = buttonCapsCount;
+            status = HidP_GetButtonCaps(HidP_Feature, buttonCaps, &actualButtonCaps, preparsedData);
+            if (status != HIDP_STATUS_SUCCESS) {
+                free(buttonCaps);
+                buttonCaps = NULL;
+                actualButtonCaps = 0;
+            }
+        }
+    }
+
+    reportIdCount = 0;
+    memset(reportIds, 0, sizeof(reportIds));
+    for (i = 0; i < actualCaps; i++) {
+        AddUpsReportId(reportIds, &reportIdCount, valueCaps[i].ReportID);
+    }
+    for (i = 0; i < actualButtonCaps; i++) {
+        AddUpsReportId(reportIds, &reportIdCount, buttonCaps[i].ReportID);
+    }
+
+    for (i = 0; i < reportIdCount; i++) {
+        if (record->FeatureReportCount >= LLB_MAX_UPS_FEATURE_REPORTS) {
+            break;
+        }
+        featureReport = &record->FeatureReports[record->FeatureReportCount++];
+        memset(featureReport, 0, sizeof(*featureReport));
+        featureReport->ReportId = reportIds[i];
+        featureReport->BufferLength = caps->FeatureReportByteLength;
+
+        if (caps->FeatureReportByteLength > LLB_MAX_UPS_REPORT_BYTES) {
+            featureReport->ErrorCode = ERROR_INSUFFICIENT_BUFFER;
+            continue;
+        }
+
+        featureReport->Data[0] = reportIds[i];
+        if (HidD_GetFeature(device, featureReport->Data, caps->FeatureReportByteLength)) {
+            featureReport->Available = TRUE;
+            featureReport->ErrorCode = ERROR_SUCCESS;
+        } else {
+            featureReport->ErrorCode = GetLastError();
+        }
+    }
+
+    for (i = 0; i < actualCaps; i++) {
+        if (valueCaps[i].IsRange) {
+            usageMin = valueCaps[i].Range.UsageMin;
+            usageMax = valueCaps[i].Range.UsageMax;
+        } else {
+            usageMin = valueCaps[i].NotRange.Usage;
+            usageMax = valueCaps[i].NotRange.Usage;
+        }
+        if (usageMax < usageMin) {
+            continue;
+        }
+        if ((DWORD)usageMax - (DWORD)usageMin > LLB_MAX_UPS_VALUES) {
+            usageMax = (USAGE)(usageMin + LLB_MAX_UPS_VALUES);
+        }
+
+        featureReport = FindUpsFeatureReport(record, valueCaps[i].ReportID);
+        if (featureReport == NULL || !featureReport->Available) {
+            continue;
+        }
+
+        for (j = (DWORD)usageMin; j <= (DWORD)usageMax; j++) {
+            rawValue = 0;
+            status = HidP_GetUsageValue(
+                HidP_Feature,
+                valueCaps[i].UsagePage,
+                valueCaps[i].LinkCollection,
+                (USAGE)j,
+                &rawValue,
+                preparsedData,
+                (PCHAR)featureReport->Data,
+                featureReport->BufferLength);
+            if (status != HIDP_STATUS_SUCCESS) {
+                continue;
+            }
+
+            scaledValue = 0;
+            status = HidP_GetScaledUsageValue(
+                HidP_Feature,
+                valueCaps[i].UsagePage,
+                valueCaps[i].LinkCollection,
+                (USAGE)j,
+                &scaledValue,
+                preparsedData,
+                (PCHAR)featureReport->Data,
+                featureReport->BufferLength);
+            AddUpsValue(record, &valueCaps[i], (USAGE)j, rawValue,
+                        scaledValue, status == HIDP_STATUS_SUCCESS, FALSE);
+            if (record->ValueCount >= LLB_MAX_UPS_VALUES) {
+                break;
+            }
+        }
+        if (record->ValueCount >= LLB_MAX_UPS_VALUES) {
+            break;
+        }
+    }
+
+    if (valueCaps != NULL) {
+        free(valueCaps);
+    }
+    if (buttonCaps != NULL) {
+        free(buttonCaps);
+    }
+}
+
+static void ReadUpsInputReports(
+    HANDLE device,
+    PHIDP_PREPARSED_DATA preparsedData,
+    const HIDP_CAPS *caps,
+    LLB_UPS_RECORD *record)
+{
+    PHIDP_VALUE_CAPS valueCaps;
+    PHIDP_BUTTON_CAPS buttonCaps;
+    USHORT valueCapsCount;
+    USHORT actualCaps;
+    USHORT buttonCapsCount;
+    USHORT actualButtonCaps;
+    UCHAR reportIds[LLB_MAX_UPS_FEATURE_REPORTS];
+    DWORD reportIdCount;
+    DWORD i;
+    DWORD j;
+    USAGE usageMin;
+    USAGE usageMax;
+    ULONG rawValue;
+    LONG scaledValue;
+    NTSTATUS status;
+    LLB_UPS_REPORT_DATA *inputReport;
+    size_t allocationSize;
+
+    record->InputReportCount = 0;
+    if ((caps->NumberInputValueCaps == 0 && caps->NumberInputButtonCaps == 0) ||
+        caps->InputReportByteLength == 0) {
+        return;
+    }
+
+    valueCaps = NULL;
+    actualCaps = 0;
+    if (caps->NumberInputValueCaps > 0) {
+        valueCapsCount = caps->NumberInputValueCaps;
+        allocationSize = (size_t)valueCapsCount * sizeof(HIDP_VALUE_CAPS);
+        valueCaps = (PHIDP_VALUE_CAPS)calloc(1, allocationSize);
+        if (valueCaps != NULL) {
+            actualCaps = valueCapsCount;
+            status = HidP_GetValueCaps(HidP_Input, valueCaps, &actualCaps, preparsedData);
+            if (status != HIDP_STATUS_SUCCESS) {
+                free(valueCaps);
+                valueCaps = NULL;
+                actualCaps = 0;
+            }
+        }
+    }
+
+    buttonCaps = NULL;
+    actualButtonCaps = 0;
+    if (caps->NumberInputButtonCaps > 0) {
+        buttonCapsCount = caps->NumberInputButtonCaps;
+        allocationSize = (size_t)buttonCapsCount * sizeof(HIDP_BUTTON_CAPS);
+        buttonCaps = (PHIDP_BUTTON_CAPS)calloc(1, allocationSize);
+        if (buttonCaps != NULL) {
+            actualButtonCaps = buttonCapsCount;
+            status = HidP_GetButtonCaps(HidP_Input, buttonCaps, &actualButtonCaps, preparsedData);
+            if (status != HIDP_STATUS_SUCCESS) {
+                free(buttonCaps);
+                buttonCaps = NULL;
+                actualButtonCaps = 0;
+            }
+        }
+    }
+
+    reportIdCount = 0;
+    memset(reportIds, 0, sizeof(reportIds));
+    for (i = 0; i < actualCaps; i++) {
+        AddUpsReportId(reportIds, &reportIdCount, valueCaps[i].ReportID);
+    }
+    for (i = 0; i < actualButtonCaps; i++) {
+        AddUpsReportId(reportIds, &reportIdCount, buttonCaps[i].ReportID);
+    }
+
+    for (i = 0; i < reportIdCount; i++) {
+        if (record->InputReportCount >= LLB_MAX_UPS_FEATURE_REPORTS) {
+            break;
+        }
+        inputReport = &record->InputReports[record->InputReportCount++];
+        memset(inputReport, 0, sizeof(*inputReport));
+        inputReport->ReportId = reportIds[i];
+        inputReport->BufferLength = caps->InputReportByteLength;
+
+        if (caps->InputReportByteLength > LLB_MAX_UPS_REPORT_BYTES) {
+            inputReport->ErrorCode = ERROR_INSUFFICIENT_BUFFER;
+            continue;
+        }
+
+        inputReport->Data[0] = reportIds[i];
+        if (HidD_GetInputReport(device, inputReport->Data, caps->InputReportByteLength)) {
+            inputReport->Available = TRUE;
+            inputReport->ErrorCode = ERROR_SUCCESS;
+        } else {
+            inputReport->ErrorCode = GetLastError();
+        }
+    }
+
+    for (i = 0; i < actualCaps; i++) {
+        if (valueCaps[i].IsRange) {
+            usageMin = valueCaps[i].Range.UsageMin;
+            usageMax = valueCaps[i].Range.UsageMax;
+        } else {
+            usageMin = valueCaps[i].NotRange.Usage;
+            usageMax = valueCaps[i].NotRange.Usage;
+        }
+        if (usageMax < usageMin) {
+            continue;
+        }
+        if ((DWORD)usageMax - (DWORD)usageMin > LLB_MAX_UPS_VALUES) {
+            usageMax = (USAGE)(usageMin + LLB_MAX_UPS_VALUES);
+        }
+
+        inputReport = FindUpsInputReport(record, valueCaps[i].ReportID);
+        if (inputReport == NULL || !inputReport->Available) {
+            continue;
+        }
+
+        for (j = (DWORD)usageMin; j <= (DWORD)usageMax; j++) {
+            rawValue = 0;
+            status = HidP_GetUsageValue(
+                HidP_Input,
+                valueCaps[i].UsagePage,
+                valueCaps[i].LinkCollection,
+                (USAGE)j,
+                &rawValue,
+                preparsedData,
+                (PCHAR)inputReport->Data,
+                inputReport->BufferLength);
+            if (status != HIDP_STATUS_SUCCESS) {
+                continue;
+            }
+
+            scaledValue = 0;
+            status = HidP_GetScaledUsageValue(
+                HidP_Input,
+                valueCaps[i].UsagePage,
+                valueCaps[i].LinkCollection,
+                (USAGE)j,
+                &scaledValue,
+                preparsedData,
+                (PCHAR)inputReport->Data,
+                inputReport->BufferLength);
+            AddUpsValue(record, &valueCaps[i], (USAGE)j, rawValue,
+                        scaledValue, status == HIDP_STATUS_SUCCESS, TRUE);
+            if (record->ValueCount >= LLB_MAX_UPS_VALUES) {
+                break;
+            }
+        }
+        if (record->ValueCount >= LLB_MAX_UPS_VALUES) {
+            break;
+        }
+    }
+
+    if (valueCaps != NULL) {
+        free(valueCaps);
+    }
+    if (buttonCaps != NULL) {
+        free(buttonCaps);
+    }
+}
+
+static BOOL CollectUps(void)
+{
+    GUID hidGuid;
+    HDEVINFO deviceInfo;
+    SP_DEVICE_INTERFACE_DATA interfaceData;
+    PSP_DEVICE_INTERFACE_DETAIL_DATA_A detailData;
+    HANDLE device;
+    PHIDP_PREPARSED_DATA preparsedData;
+    HIDP_CAPS caps;
+    HIDD_ATTRIBUTES attributes;
+    DWORD requiredSize;
+    DWORD errorCode;
+    DWORD index;
+    DWORD number;
+    NTSTATUS hidStatus;
+    LLB_UPS_RECORD *record;
+    char currentDevicePath[LLB_TEXT_SIZE];
+
+    memset(LLB_UpsRecords, 0, sizeof(LLB_UpsRecords));
+    LLB_UpsRecordCount = 0;
+    LLB_UpsInterfaceCount = 0;
+    LLB_UpsHidInterfacesScanned = 0;
+    LLB_UpsEnumerationError = ERROR_SUCCESS;
+    LLB_UpsTruncated = FALSE;
+
+    HidD_GetHidGuid(&hidGuid);
+    deviceInfo = SetupDiGetClassDevsA(
+        &hidGuid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (deviceInfo == INVALID_HANDLE_VALUE) {
+        LLB_UpsEnumerationError = GetLastError();
+        return FALSE;
+    }
+
+    index = 0;
+    for (;;) {
+        memset(&interfaceData, 0, sizeof(interfaceData));
+        interfaceData.cbSize = sizeof(interfaceData);
+        if (!SetupDiEnumDeviceInterfaces(deviceInfo, NULL, &hidGuid, index, &interfaceData)) {
+            errorCode = GetLastError();
+            if (errorCode != ERROR_NO_MORE_ITEMS) {
+                LLB_UpsEnumerationError = errorCode;
+            }
+            break;
+        }
+
+        index++;
+        LLB_UpsHidInterfacesScanned++;
+        requiredSize = 0;
+        SetupDiGetDeviceInterfaceDetailA(deviceInfo, &interfaceData, NULL, 0, &requiredSize, NULL);
+        if (requiredSize == 0) {
+            continue;
+        }
+
+        detailData = (PSP_DEVICE_INTERFACE_DETAIL_DATA_A)malloc(requiredSize);
+        if (detailData == NULL) {
+            LLB_UpsEnumerationError = ERROR_NOT_ENOUGH_MEMORY;
+            continue;
+        }
+        memset(detailData, 0, requiredSize);
+        detailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A);
+        if (!SetupDiGetDeviceInterfaceDetailA(
+                deviceInfo, &interfaceData, detailData, requiredSize, NULL, NULL)) {
+            free(detailData);
+            continue;
+        }
+
+        CopyText(currentDevicePath, sizeof(currentDevicePath), detailData->DevicePath);
+        device = CreateFileA(
+            currentDevicePath,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL);
+        errorCode = GetLastError();
+        if (device == INVALID_HANDLE_VALUE) {
+            device = CreateFileA(
+                currentDevicePath,
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                NULL,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                NULL);
+        }
+        if (device == INVALID_HANDLE_VALUE) {
+            device = CreateFileA(
+                currentDevicePath,
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                NULL,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                NULL);
+        }
+        free(detailData);
+        if (device == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+
+        preparsedData = NULL;
+        if (!HidD_GetPreparsedData(device, &preparsedData)) {
+            CloseHandle(device);
+            continue;
+        }
+
+        memset(&caps, 0, sizeof(caps));
+        hidStatus = HidP_GetCaps(preparsedData, &caps);
+        if (hidStatus != HIDP_STATUS_SUCCESS ||
+            caps.UsagePage != LLB_HID_POWER_PAGE ||
+            caps.Usage != LLB_HID_UPS_USAGE) {
+            HidD_FreePreparsedData(preparsedData);
+            CloseHandle(device);
+            continue;
+        }
+
+        LLB_UpsInterfaceCount++;
+        number = LLB_UpsInterfaceCount;
+        if (LLB_UpsRecordCount >= LLB_MAX_UPS) {
+            LLB_UpsTruncated = TRUE;
+            HidD_FreePreparsedData(preparsedData);
+            CloseHandle(device);
+            continue;
+        }
+
+        record = &LLB_UpsRecords[LLB_UpsRecordCount++];
+        memset(record, 0, sizeof(*record));
+        record->Number = number;
+        record->DeviceOpened = TRUE;
+        CopyText(record->DevicePath, sizeof(record->DevicePath), currentDevicePath);
+        record->DevicePathAvailable = TRUE;
+        record->CapsAvailable = TRUE;
+        record->UsagePage = caps.UsagePage;
+        record->Usage = caps.Usage;
+        record->InputReportByteLength = caps.InputReportByteLength;
+        record->OutputReportByteLength = caps.OutputReportByteLength;
+        record->FeatureReportByteLength = caps.FeatureReportByteLength;
+        record->NumberInputButtonCaps = caps.NumberInputButtonCaps;
+        record->NumberInputValueCaps = caps.NumberInputValueCaps;
+        record->NumberOutputButtonCaps = caps.NumberOutputButtonCaps;
+        record->NumberOutputValueCaps = caps.NumberOutputValueCaps;
+        record->NumberFeatureButtonCaps = caps.NumberFeatureButtonCaps;
+        record->NumberFeatureValueCaps = caps.NumberFeatureValueCaps;
+
+        memset(&attributes, 0, sizeof(attributes));
+        attributes.Size = sizeof(attributes);
+        if (HidD_GetAttributes(device, &attributes)) {
+            record->AttributesAvailable = TRUE;
+            record->VendorID = attributes.VendorID;
+            record->ProductID = attributes.ProductID;
+            record->VersionNumber = attributes.VersionNumber;
+        }
+        ConvertHidString(device, 0, record->Manufacturer, sizeof(record->Manufacturer));
+        ConvertHidString(device, 1, record->Product, sizeof(record->Product));
+        ConvertHidString(device, 2, record->SerialNumber, sizeof(record->SerialNumber));
+        ReadUpsFeatureReports(device, preparsedData, &caps, record);
+        ReadUpsInputReports(device, preparsedData, &caps, record);
+
+        HidD_FreePreparsedData(preparsedData);
+        CloseHandle(device);
+    }
+
+    SetupDiDestroyDeviceInfoList(deviceInfo);
+    return LLB_UpsEnumerationError == ERROR_SUCCESS;
+}
+
+static const char *GetUpsUsageName(USAGE page, USAGE usage)
+{
+    if (page == LLB_HID_POWER_PAGE) {
+        switch (usage) {
+            case 0x01: return "iName";
+            case 0x24: return "PowerSummary";
+            case 0x30: return "Voltage";
+            case 0x31: return "Current";
+            case 0x32: return "Frequency";
+            case 0x33: return "ApparentPower";
+            case 0x34: return "ActivePower";
+            case 0x35: return "PercentLoad";
+            case 0x36: return "Temperature";
+            case 0x60: return "Present";
+            case 0x61: return "Good";
+            case 0x62: return "InternalFailure";
+            case 0x63: return "VoltageOutOfRange";
+            case 0x64: return "FrequencyOutOfRange";
+            case 0x65: return "Overload";
+            case 0x66: return "Overcharged";
+            case 0x67: return "OverTemperature";
+            case 0x68: return "ShutdownRequested";
+            case 0x69: return "ShutdownImminent";
+            case 0xFD: return "iManufacturer";
+            case 0xFE: return "iProduct";
+            case 0xFF: return "iSerialNumber";
+        }
+    } else if (page == LLB_HID_BATTERY_PAGE) {
+        switch (usage) {
+            case 0x44: return "Charging";
+            case 0x45: return "Discharging";
+            case 0x46: return "FullyCharged";
+            case 0x47: return "FullyDischarged";
+            case 0x4B: return "NeedReplacement";
+            case 0x64: return "RelativeStateOfCharge";
+            case 0x65: return "AbsoluteStateOfCharge";
+            case 0x66: return "RemainingCapacity";
+            case 0x67: return "FullChargeCapacity";
+            case 0x68: return "RunTimeToEmpty";
+            case 0x6B: return "CycleCount";
+            case 0x83: return "DesignCapacity";
+            case 0x85: return "ManufacturerDate";
+            case 0x86: return "SerialNumber";
+            case 0x87: return "iManufacturerName";
+            case 0x88: return "iDeviceName";
+            case 0x89: return "iDeviceChemistry";
+            case 0x8B: return "Rechargeable";
+            case 0xD0: return "ACPresent";
+            case 0xD1: return "BatteryPresent";
+            case 0xD2: return "PowerFail";
+        }
+    }
+    return "Unmapped HID usage";
+}
+
+static void PrintUpsValue(FILE *out, const LLB_UPS_VALUE *value)
+{
+    const char *name;
+    name = GetUpsUsageName(value->UsagePage, value->Usage);
+    fprintf(out, "  %s (%s report, page 0x%04X, usage 0x%04X, report ID %u): raw value %lu",
+            name, value->IsInputReport ? "input" : "feature",
+            (unsigned int)value->UsagePage, (unsigned int)value->Usage,
+            (unsigned int)value->ReportId, (unsigned long)value->RawValue);
+    if (value->ScaledAvailable) {
+        fprintf(out, ", scaled HID value %ld", (long)value->ScaledValue);
+        if ((value->UsagePage == LLB_HID_POWER_PAGE && value->Usage == 0x30) ||
+            (value->UsagePage == LLB_HID_POWER_PAGE && value->Usage == 0x40)) {
+            fprintf(out, " (volts, subject to HID descriptor scaling)");
+        } else if (value->UsagePage == LLB_HID_POWER_PAGE && value->Usage == 0x31) {
+            fprintf(out, " (amps, subject to HID descriptor scaling)");
+        } else if (value->UsagePage == LLB_HID_POWER_PAGE && value->Usage == 0x32) {
+            fprintf(out, " (hertz, subject to HID descriptor scaling)");
+        } else if (value->UsagePage == LLB_HID_POWER_PAGE && value->Usage == 0x33) {
+            fprintf(out, " (volt-amperes, subject to HID descriptor scaling)");
+        } else if (value->UsagePage == LLB_HID_POWER_PAGE && value->Usage == 0x34) {
+            fprintf(out, " (watts, subject to HID descriptor scaling)");
+        } else if ((value->UsagePage == LLB_HID_POWER_PAGE && value->Usage == 0x35) ||
+                   (value->UsagePage == LLB_HID_BATTERY_PAGE &&
+                    (value->Usage == 0x64 || value->Usage == 0x65))) {
+            fprintf(out, " (%%)");
+        } else if (value->UsagePage == LLB_HID_POWER_PAGE && value->Usage == 0x36) {
+            fprintf(out, " (temperature; check HID unit metadata)");
+        } else if (value->UsagePage == LLB_HID_BATTERY_PAGE && value->Usage == 0x68) {
+            fprintf(out, " (standard usage is minutes; check HID scaling metadata)");
+        } else if (value->UsagePage == LLB_HID_BATTERY_PAGE && value->Usage == 0x6B) {
+            fprintf(out, " (cycles)");
+        }
+    }
+    if (value->UsagePage == LLB_HID_BATTERY_PAGE &&
+        (value->Usage == 0x44 || value->Usage == 0x45 || value->Usage == 0x46 ||
+         value->Usage == 0x47 || value->Usage == 0x4B || value->Usage == 0xD0 ||
+         value->Usage == 0xD1 || value->Usage == 0xD2) && value->RawValue <= 1) {
+        fprintf(out, " (%s)", value->RawValue ? "Yes" : "No");
+    }
+    if (value->UsagePage == LLB_HID_POWER_PAGE && value->Usage >= 0x60 &&
+        value->Usage <= 0x73 && value->RawValue <= 1) {
+        fprintf(out, " (%s)", value->RawValue ? "Yes" : "No");
+    }
+    fprintf(out, "; logical range %ld to %ld; units 0x%08lX; unit exponent %lu\n",
+            (long)value->LogicalMin, (long)value->LogicalMax,
+            (unsigned long)value->Units, (unsigned long)value->UnitsExp);
+}
+
+static void PrintUpsInformationSection(FILE *out)
+{
+    DWORD i;
+    DWORD j;
+    const LLB_UPS_RECORD *record;
+
+    fprintf(out, "\n============================================================\n");
+    fprintf(out, "UPS DEVICES\n");
+    fprintf(out, "HID Power Device detection (usage page 0x0084, usage 0x0004)\n");
+    fprintf(out, "============================================================\n");
+    fprintf(out, "HID interfaces scanned: %lu\n", (unsigned long)LLB_UpsHidInterfacesScanned);
+    fprintf(out, "UPS interfaces detected: %lu\n", (unsigned long)LLB_UpsInterfaceCount);
+    fprintf(out, "UPS records displayed: %lu\n", (unsigned long)LLB_UpsRecordCount);
+    if (LLB_UpsEnumerationError != ERROR_SUCCESS) {
+        PrintWindowsError(out, "HID UPS enumeration", LLB_UpsEnumerationError);
+    }
+    if (LLB_UpsTruncated) {
+        fprintf(out, "Warning: Display limited to %d UPS interfaces.\n", LLB_MAX_UPS);
+    }
+    if (LLB_UpsRecordCount == 0) {
+        fprintf(out, "No standard HID UPS collection was detected.\n");
+        fprintf(out, "Some UPS devices use serial or vendor-specific protocols and may not appear here.\n");
+        return;
+    }
+
+    for (i = 0; i < LLB_UpsRecordCount; i++) {
+        record = &LLB_UpsRecords[i];
+        fprintf(out, "\n------------------------------------------------------------\n");
+        fprintf(out, "UPS #%lu\n", (unsigned long)record->Number);
+        fprintf(out, "------------------------------------------------------------\n");
+        fprintf(out, "Device status: %s\n", record->DeviceOpened ? "Opened successfully" : "Not opened");
+        fprintf(out, "Manufacturer: %s\n", record->Manufacturer[0] ? record->Manufacturer : "Not reported");
+        fprintf(out, "Product / model: %s\n", record->Product[0] ? record->Product : "Not reported");
+        fprintf(out, "Serial number: %s\n", record->SerialNumber[0] ? record->SerialNumber : "Not reported");
+        if (record->AttributesAvailable) {
+            fprintf(out, "USB vendor ID: 0x%04X\n", (unsigned int)record->VendorID);
+            fprintf(out, "USB product ID: 0x%04X\n", (unsigned int)record->ProductID);
+            fprintf(out, "USB device version: 0x%04X\n", (unsigned int)record->VersionNumber);
+        } else {
+            fprintf(out, "USB identifiers: Not reported\n");
+        }
+        fprintf(out, "HID usage page: 0x%04X\n", (unsigned int)record->UsagePage);
+        fprintf(out, "HID usage: 0x%04X (UPS)\n", (unsigned int)record->Usage);
+        fprintf(out, "Input report length: %u byte(s)\n", (unsigned int)record->InputReportByteLength);
+        fprintf(out, "Output report length: %u byte(s)\n", (unsigned int)record->OutputReportByteLength);
+        fprintf(out, "Feature report length: %u byte(s)\n", (unsigned int)record->FeatureReportByteLength);
+        fprintf(out, "Input value capabilities: %u\n", (unsigned int)record->NumberInputValueCaps);
+        fprintf(out, "Input button capabilities: %u\n", (unsigned int)record->NumberInputButtonCaps);
+        fprintf(out, "Feature value capabilities: %u\n", (unsigned int)record->NumberFeatureValueCaps);
+        fprintf(out, "Feature button capabilities: %u\n", (unsigned int)record->NumberFeatureButtonCaps);
+        fprintf(out, "Readable input reports: ");
+        {
+            DWORD availableCount = 0;
+            for (j = 0; j < record->InputReportCount; j++) {
+                if (record->InputReports[j].Available) {
+                    availableCount++;
+                }
+            }
+            fprintf(out, "%lu of %lu attempted\n",
+                    (unsigned long)availableCount,
+                    (unsigned long)record->InputReportCount);
+        }
+        fprintf(out, "Readable feature reports: ");
+        {
+            DWORD availableCount = 0;
+            for (j = 0; j < record->FeatureReportCount; j++) {
+                if (record->FeatureReports[j].Available) {
+                    availableCount++;
+                }
+            }
+            fprintf(out, "%lu of %lu attempted\n",
+                    (unsigned long)availableCount,
+                    (unsigned long)record->FeatureReportCount);
+        }
+        if (record->ValueCount > 0) {
+            fprintf(out, "Decoded HID values from readable input/feature reports:\n");
+            for (j = 0; j < record->ValueCount; j++) {
+                PrintUpsValue(out, &record->Values[j]);
+            }
+        } else {
+            fprintf(out, "No values could be decoded from readable input or feature reports. The UPS may expose data through a vendor-specific protocol.\n");
+        }
+    }
+}
+
+static void PrintUpsRawSection(FILE *out)
+{
+    DWORD i;
+    DWORD j;
+    const LLB_UPS_RECORD *record;
+    const LLB_UPS_REPORT_DATA *featureReport;
+    char label[128];
+
+    fprintf(out, "\n============================================================\n");
+    fprintf(out, "UPS RAW DEVICE DATA\n");
+    fprintf(out, "HID input/feature report bytes and collection details\n");
+    fprintf(out, "============================================================\n");
+    fprintf(out, "HID interfaces scanned: %lu\n", (unsigned long)LLB_UpsHidInterfacesScanned);
+    fprintf(out, "UPS interfaces detected: %lu\n", (unsigned long)LLB_UpsInterfaceCount);
+    fprintf(out, "HID enumeration result: %s\n",
+            LLB_UpsEnumerationError == ERROR_SUCCESS ? "SUCCESS" : "FAILED");
+    if (LLB_UpsEnumerationError != ERROR_SUCCESS) {
+        PrintWindowsError(out, "HID UPS enumeration", LLB_UpsEnumerationError);
+    }
+    if (LLB_UpsRecordCount == 0) {
+        fprintf(out, "No UPS raw records are available.\n");
+        return;
+    }
+
+    for (i = 0; i < LLB_UpsRecordCount; i++) {
+        record = &LLB_UpsRecords[i];
+        fprintf(out, "\n------------------------------------------------------------\n");
+        fprintf(out, "UPS #%lu | RAW DATA\n", (unsigned long)record->Number);
+        fprintf(out, "------------------------------------------------------------\n");
+        if (record->DevicePathAvailable) {
+            fprintf(out, "Device path: %s\n", record->DevicePath);
+        }
+        fprintf(out, "HID usage page: 0x%04X\n", (unsigned int)record->UsagePage);
+        fprintf(out, "HID usage: 0x%04X\n", (unsigned int)record->Usage);
+        fprintf(out, "Input report length: %u\n", (unsigned int)record->InputReportByteLength);
+        fprintf(out, "Feature report length: %u\n", (unsigned int)record->FeatureReportByteLength);
+        if (record->AttributesAvailable) {
+            fprintf(out, "VID/PID/version: %04X/%04X/%04X\n",
+                    (unsigned int)record->VendorID,
+                    (unsigned int)record->ProductID,
+                    (unsigned int)record->VersionNumber);
+        }
+        for (j = 0; j < record->InputReportCount; j++) {
+            featureReport = &record->InputReports[j];
+            fprintf(out, "\n[UPS INPUT REPORT ID %u]\n", (unsigned int)featureReport->ReportId);
+            fprintf(out, "Query result: %s\n", featureReport->Available ? "SUCCESS" : "FAILED");
+            fprintf(out, "Requested bytes: %lu\n", (unsigned long)featureReport->BufferLength);
+            if (featureReport->Available) {
+                snprintf(label, sizeof(label), "Input report data (ID %u)", (unsigned int)featureReport->ReportId);
+                DumpBytes(out, label, featureReport->Data, featureReport->BufferLength);
+            } else {
+                if (featureReport->ErrorCode != ERROR_SUCCESS) {
+                    PrintWindowsError(out, "HidD_GetInputReport", featureReport->ErrorCode);
+                }
+                fprintf(out, "No input report bytes were returned.\n");
+            }
+        }
+        for (j = 0; j < record->FeatureReportCount; j++) {
+            featureReport = &record->FeatureReports[j];
+            fprintf(out, "\n[UPS FEATURE REPORT ID %u]\n", (unsigned int)featureReport->ReportId);
+            fprintf(out, "Query result: %s\n", featureReport->Available ? "SUCCESS" : "FAILED");
+            fprintf(out, "Requested bytes: %lu\n", (unsigned long)featureReport->BufferLength);
+            if (featureReport->Available) {
+                snprintf(label, sizeof(label), "Feature report data (ID %u)", (unsigned int)featureReport->ReportId);
+                DumpBytes(out, label, featureReport->Data, featureReport->BufferLength);
+            } else {
+                if (featureReport->ErrorCode != ERROR_SUCCESS) {
+                    PrintWindowsError(out, "HidD_GetFeature", featureReport->ErrorCode);
+                }
+                fprintf(out, "No feature report bytes were returned.\n");
+            }
+        }
+        if (record->InputReportCount == 0 && record->FeatureReportCount == 0) {
+            fprintf(out, "No input or feature report IDs were declared in the readable capabilities.\n");
+        }
+        fprintf(out, "\nDecoded input/feature values:\n");
+        if (record->ValueCount == 0) {
+            fprintf(out, "  No readable feature values.\n");
+        } else {
+            for (j = 0; j < record->ValueCount; j++) {
+                PrintUpsValue(out, &record->Values[j]);
+            }
+        }
+    }
+}
+
+static void RenderUpsReport(FILE *out, const LLB_OPTIONS *options)
+{
+    fprintf(out, "Low-Level Battery Info %s - UPS module\n", LLB_VERSION);
+    fprintf(out, "Created by: %s\n", LLB_AUTHOR);
+    fprintf(out, "GitHub: %s\n", LLB_GITHUB);
+    fprintf(out, "%s\n", LLB_COPYRIGHT);
+    PrintUpsInformationSection(out);
+    if (options->IncludeRaw) {
+        PrintUpsRawSection(out);
     }
 }
 
@@ -1600,6 +2563,8 @@ static void RenderReport(
         PrintBatteryInformationSection(out, &records[i]);
     }
 
+    PrintUpsInformationSection(out);
+
     if (out == stdout && !options->Once) {
         fprintf(out, "\nKeys: [R] Refresh  [E] Export report  [Q] Quit\n");
         fprintf(out, "Press a key to continue. Data refresh is manual only.\n");
@@ -1607,6 +2572,7 @@ static void RenderReport(
 
     if (options->IncludeRaw) {
         PrintRawSection(out, records, recordCount, interfaceCount, truncated, collectionError);
+        PrintUpsRawSection(out);
     }
 }
 
@@ -1627,7 +2593,9 @@ static BOOL SaveReport(
         return FALSE;
     }
 
-    if (options->FieldOnly) {
+    if (options->UpsOnly) {
+        RenderUpsReport(file, options);
+    } else if (options->FieldOnly) {
         RenderFieldReport(file, records, recordCount, options);
     } else {
         RenderReport(file, records, recordCount, interfaceCount, truncated,
@@ -1803,6 +2771,8 @@ static void PrintUsage(FILE *out)
     fprintf(out, "  -h, --help              Show this help text\n");
     fprintf(out, "      --version           Show program version\n");
     fprintf(out, "      --list-fields       List fields that can be queried individually\n");
+    fprintf(out, "      --list-ups          Scan and display HID UPS devices only\n");
+    fprintf(out, "      --ups-only          Same as --list-ups\n");
     fprintf(out, "  -g, --get <field>       Print only one battery field\n");
     fprintf(out, "      --slot <number>     Select a slot for a single-field query\n");
     fprintf(out, "  -o, --once              Collect and display one full snapshot\n");
@@ -1816,7 +2786,9 @@ static void PrintUsage(FILE *out)
     fprintf(out, "  llb.exe --get designed-capacity\n");
     fprintf(out, "  llb.exe --get voltage --slot 1\n");
     fprintf(out, "  llb.exe --get manufacturer --export manufacturer.txt\n");
-    fprintf(out, "  llb.exe --once --no-raw --export snapshot.txt\n\n");
+    fprintf(out, "  llb.exe --once --no-raw --export snapshot.txt\n");
+    fprintf(out, "  llb.exe --list-ups\n");
+    fprintf(out, "  llb.exe --list-ups --export ups-report.txt\n\n");
     fprintf(out, "Interactive keys in full-report mode: R refresh, E export, Q or Esc quit.\n");
 }
 
@@ -1896,6 +2868,10 @@ static int ParseArguments(int argc, char **argv, LLB_OPTIONS *options)
         } else if (strcmp(argv[i], "--list-fields") == 0) {
             PrintFieldList(stdout);
             return 0;
+        } else if (strcmp(argv[i], "--list-ups") == 0 || strcmp(argv[i], "--ups-only") == 0) {
+            options->UpsOnly = TRUE;
+            options->Once = TRUE;
+            options->PauseAtEnd = FALSE;
         } else if (strcmp(argv[i], "-g") == 0 || strcmp(argv[i], "--get") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "Missing field name for %s.\n", argv[i]);
@@ -1957,6 +2933,10 @@ static int ParseArguments(int argc, char **argv, LLB_OPTIONS *options)
         }
     }
 
+    if (options->UpsOnly && options->FieldOnly) {
+        fprintf(stderr, "--list-ups cannot be combined with a battery single-field query.\n");
+        return -1;
+    }
     if (options->HasSlotFilter && !options->FieldOnly) {
         fprintf(stderr, "--slot can only be used with --get or a single-field option.\n");
         return -1;
@@ -2018,14 +2998,27 @@ int main(int argc, char **argv)
     while (running && !LLB_StopRequested) {
         if (forceRefresh) {
             forceRefresh = FALSE;
-            CollectBatteries(records, &recordCount, &interfaceCount,
-                             &truncated, &collectionError);
+            if (options.UpsOnly) {
+                recordCount = 0;
+                interfaceCount = 0;
+                collectionError = ERROR_SUCCESS;
+                truncated = FALSE;
+            } else {
+                CollectBatteries(records, &recordCount, &interfaceCount,
+                                 &truncated, &collectionError);
+            }
+
+            if (!options.FieldOnly) {
+                CollectUps();
+            }
 
             if (consoleAvailable && !options.Once) {
                 system("cls");
             }
 
-            if (options.FieldOnly) {
+            if (options.UpsOnly) {
+                RenderUpsReport(stdout, &options);
+            } else if (options.FieldOnly) {
                 RenderFieldReport(stdout, records, recordCount, &options);
             } else {
                 RenderReport(stdout, records, recordCount, interfaceCount,
