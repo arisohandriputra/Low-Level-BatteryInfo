@@ -66,6 +66,9 @@
     <Import Include="System.Windows.Forms" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="BatteryHorizontalProgressBar.vb">
+      <SubType>Component</SubType>
+    </Compile>
     <Compile Include="BatteryVerticalProgressBar.vb">
       <SubType>Component</SubType>
     </Compile>
@@ -74,6 +77,12 @@
     </Compile>
     <Compile Include="Form1.Designer.vb">
       <DependentUpon>Form1.vb</DependentUpon>
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="frmRAW.Designer.vb">
+      <DependentUpon>frmRAW.vb</DependentUpon>
+    </Compile>
+    <Compile Include="frmRAW.vb">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="My Project\AssemblyInfo.vb" />
@@ -95,6 +104,9 @@
   <ItemGroup>
     <EmbeddedResource Include="Form1.resx">
       <DependentUpon>Form1.vb</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="frmRAW.resx">
+      <DependentUpon>frmRAW.vb</DependentUpon>
     </EmbeddedResource>
     <EmbeddedResource Include="My Project\Resources.resx">
       <Generator>VbMyResourcesResXFileCodeGenerator</Generator>

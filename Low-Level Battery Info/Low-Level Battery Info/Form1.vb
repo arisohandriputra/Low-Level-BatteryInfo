@@ -19,7 +19,6 @@ Public Class Form1
     Private selectedSlotNumber As Integer = 0
     Private refreshTimer As System.Windows.Forms.Timer
     Private closingForm As Boolean = False
-
     Public Event BatteryDataUpdated As EventHandler
 
     Private Class RefreshRequest
@@ -75,13 +74,19 @@ Public Class Form1
         bVoltage.Text = GetSelectedBatteryValueOrDefault("voltage")
         bRate.Text = GetSelectedBatteryValueOrDefault("rate")
         bPower.Text = GetSelectedBatteryValueOrDefault("power-state")
-        bCurrent.Text = GetSelectedBatteryValueOrDefault("charge-level")
+
+        bCurrent.Text = GetSelectedBatteryValueOrDefault("current-capacity") & " (" & GetSelectedBatteryValueOrDefault("percentage") & ")"
         bCondition.Text = GetSelectedBatteryValueOrDefault("condition")
-        bRuntime.Text = GetSelectedBatteryValueOrDefault("runtime")
+        bRuntime.Text = GetSelectedBatteryValueOrDefault("estimated-runtime")
         TextBox2.Text = GetSelectedBatteryValueOrDefault("system-battery")
         bAlert1.Text = GetSelectedBatteryValueOrDefault("default-alert-1")
         bAlert2.Text = GetSelectedBatteryValueOrDefault("default-alert-2")
+        bCritical.Text = GetSelectedBatteryValueOrDefault("critical-bias")
+        bShort.Text = GetSelectedBatteryValueOrDefault("short-term-battery")
+        bCapabilities.Text = GetSelectedBatteryValueOrDefault("capabilities")
+        bRelative.Text = GetSelectedBatteryValueOrDefault("relative-capacity")
         UpdateBatteryProgressBar(GetSelectedBatteryValue("percentage"))
+        UpdateBatteryCapacityProgressBar(GetSelectedBatteryValue("current-capacity"), GetSelectedBatteryValue("full-charge-capacity"))
     End Sub
 
     Private Sub UpdateBatteryProgressBar(ByVal percentageText As String)
@@ -114,6 +119,71 @@ Public Class Form1
         ProgressBar1.Value = CInt(Math.Round(percentage, MidpointRounding.AwayFromZero))
     End Sub
 
+
+    Private Sub UpdateBatteryCapacityProgressBar(ByVal currentCapacityText As String, ByVal fullChargeCapacityText As String)
+        If ProgressBar2 Is Nothing Then
+            Return
+        End If
+
+        ProgressBar2.Minimum = 0
+        ProgressBar2.Value = 0
+
+        Dim currentCapacity As Double = 0.0
+        Dim fullChargeCapacity As Double = 0.0
+
+        If Not TryParseCapacityValue(fullChargeCapacityText, fullChargeCapacity) OrElse fullChargeCapacity <= 0.0 Then
+            ProgressBar2.Maximum = 1
+            ProgressBar2.Value = 0
+            ProgressBar2.Enabled = False
+            Return
+        End If
+
+        If fullChargeCapacity > CDbl(Integer.MaxValue) Then
+            fullChargeCapacity = CDbl(Integer.MaxValue)
+        End If
+
+        Dim maximumValue As Integer = CInt(Math.Round(fullChargeCapacity, MidpointRounding.AwayFromZero))
+        If maximumValue < 1 Then
+            maximumValue = 1
+        End If
+
+        ProgressBar2.Maximum = maximumValue
+        ProgressBar2.Enabled = True
+
+        If Not TryParseCapacityValue(currentCapacityText, currentCapacity) OrElse currentCapacity < 0.0 Then
+            ProgressBar2.Value = 0
+            Return
+        End If
+
+        If currentCapacity > CDbl(ProgressBar2.Maximum) Then
+            currentCapacity = CDbl(ProgressBar2.Maximum)
+        End If
+
+        Dim currentValue As Integer = CInt(Math.Round(currentCapacity, MidpointRounding.AwayFromZero))
+        If currentValue < ProgressBar2.Minimum Then
+            currentValue = ProgressBar2.Minimum
+        ElseIf currentValue > ProgressBar2.Maximum Then
+            currentValue = ProgressBar2.Maximum
+        End If
+
+        ProgressBar2.Value = currentValue
+    End Sub
+
+    Private Function TryParseCapacityValue(ByVal capacityText As String, ByRef capacity As Double) As Boolean
+        capacity = 0.0
+
+        If capacityText Is Nothing OrElse capacityText.Trim().Length = 0 Then
+            Return False
+        End If
+
+        Dim match As Match = Regex.Match(capacityText, "[-+]?[0-9]+(?:\.[0-9]+)?")
+        If Not match.Success Then
+            Return False
+        End If
+
+        Return Double.TryParse(match.Value, NumberStyles.Float, CultureInfo.InvariantCulture, capacity)
+    End Function
+
     Private Sub Form1_Load(ByVal sender As Object, ByVal e As EventArgs) Handles MyBase.Load
         Try
             Me.KeyPreview = True
@@ -123,6 +193,11 @@ Public Class Form1
             ProgressBar1.Minimum = 0
             ProgressBar1.Maximum = 100
             ProgressBar1.Value = 0
+            If ProgressBar2 IsNot Nothing Then
+                ProgressBar2.Minimum = 0
+                ProgressBar2.Maximum = 1
+                ProgressBar2.Value = 0
+            End If
 
             llbPath = ExtractLlb()
             batteryWorker = New BackgroundWorker()
@@ -280,7 +355,20 @@ Public Class Form1
         If Not request.IncludeRaw Then
             arguments &= " --no-raw"
         End If
+        Me.Invoke(Sub()
+                      If bPower.Text.Contains("AC power online") Then
+                          lbstatuscharge.Text = "Plug In"
+                          lbstatuscharge.BackColor = Color.FromArgb(192, 255, 192)
 
+                      ElseIf bPower.Text.Contains("Discharging") Then
+                          lbstatuscharge.Text = "Unplug"
+                          lbstatuscharge.BackColor = Color.FromArgb(255, 224, 192)
+
+                      Else
+                          lbstatuscharge.Text = "Unknown"
+                          lbstatuscharge.BackColor = SystemColors.Control
+                      End If
+                  End Sub)
         Dim result As New RefreshResult()
         result.Output = RunLlb(request.ExeFile, arguments)
         result.IncludeRaw = request.IncludeRaw
@@ -825,4 +913,12 @@ Public Class Form1
         End If
     End Sub
 
+    Private Sub bCondition_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles bCondition.Click
+
+    End Sub
+
+    Private Sub Button1_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles Button1.Click
+        frmRAW.TextBox1.Text = TextBox1.Text
+        frmRAW.ShowDialog()
+    End Sub
 End Class

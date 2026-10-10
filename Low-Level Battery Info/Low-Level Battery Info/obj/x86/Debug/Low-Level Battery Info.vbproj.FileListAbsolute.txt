@@ -7,3 +7,4 @@ c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-L
 c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\obj\x86\Debug\Low-Level Battery Info.exe
 c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\obj\x86\Debug\Low-Level Battery Info.xml
 c:\users\acer\documents\visual studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\obj\x86\Debug\Low-Level Battery Info.pdb
+C:\Users\ACER\Documents\Visual Studio 2010\Projects\Low-Level Battery Info\Low-Level Battery Info\obj\x86\Debug\Low_Level_Battery_Info.frmRAW.resources
