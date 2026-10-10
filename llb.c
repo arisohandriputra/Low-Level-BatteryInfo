@@ -299,7 +299,8 @@ static const char *GetChemistryName(const BYTE chemistry[4])
     if (strcmp(code, "pbac") == 0) {
         return "Lead-acid battery";
     }
-    if (strcmp(code, "lion") == 0 || strcmp(code, "li-i") == 0) {
+    if (strcmp(code, "lion") == 0 || strcmp(code, "li-i") == 0 ||
+        strcmp(code, "real") == 0) {
         return "Lithium-ion battery";
     }
     if (strcmp(code, "lip") == 0 || strcmp(code, "lipo") == 0) {
@@ -910,6 +911,121 @@ static void PrintBatteryConditionCheck(FILE *out, const LLB_BATTERY_RECORD *reco
     fprintf(out, "The assessment is based on Windows driver data. Unsupported or inaccurate firmware readings can produce false alarms; confirm suspected failures with a known-good battery or proper hardware testing.\n");
 }
 
+static void PrintRuntimeDuration(FILE *out, DWORD seconds)
+{
+    DWORD days;
+    DWORD hours;
+    DWORD minutes;
+    DWORD remainingSeconds;
+    BOOL printed;
+
+    days = seconds / 86400UL;
+    hours = (seconds % 86400UL) / 3600UL;
+    minutes = (seconds % 3600UL) / 60UL;
+    remainingSeconds = seconds % 60UL;
+    printed = FALSE;
+
+    if (days > 0) {
+        fprintf(out, "%lu day%s", (unsigned long)days, days == 1 ? "" : "s");
+        printed = TRUE;
+    }
+
+    if (hours > 0 || days > 0) {
+        fprintf(out, "%s%lu hour%s", printed ? " " : "",
+                (unsigned long)hours, hours == 1 ? "" : "s");
+        printed = TRUE;
+    }
+
+    if (minutes > 0 || hours > 0 || days > 0 || seconds == 0) {
+        fprintf(out, "%s%lu minute%s", printed ? " " : "",
+                (unsigned long)minutes, minutes == 1 ? "" : "s");
+        printed = TRUE;
+    }
+
+    if (!printed) {
+        fprintf(out, "%lu second%s", (unsigned long)remainingSeconds,
+                remainingSeconds == 1 ? "" : "s");
+    }
+}
+
+static BOOL TryGetEstimatedRuntime(
+    const LLB_BATTERY_RECORD *record,
+    DWORD *seconds,
+    BOOL *calculated)
+{
+    double rateMagnitude;
+    double estimatedSeconds;
+
+    if (record == NULL || seconds == NULL || calculated == NULL) {
+        return FALSE;
+    }
+
+    *seconds = LLB_UNKNOWN_VALUE;
+    *calculated = FALSE;
+
+    if (record->EstimatedAvailable && record->EstimatedSeconds != LLB_UNKNOWN_VALUE) {
+        *seconds = record->EstimatedSeconds;
+        return TRUE;
+    }
+
+    if (!record->InformationAvailable || !record->StatusAvailable) {
+        return FALSE;
+    }
+
+    if ((record->Information.Capabilities & LLB_CAPACITY_RELATIVE) != 0) {
+        return FALSE;
+    }
+
+    if (record->Status.Capacity == LLB_UNKNOWN_VALUE ||
+        (DWORD)record->Status.Rate == LLB_UNKNOWN_RATE ||
+        record->Status.Rate >= 0) {
+        return FALSE;
+    }
+
+    rateMagnitude = -(double)record->Status.Rate;
+    if (rateMagnitude <= 0.0) {
+        return FALSE;
+    }
+
+    estimatedSeconds = ((double)record->Status.Capacity * 3600.0) / rateMagnitude;
+    if (estimatedSeconds < 0.0 || estimatedSeconds > (double)(LLB_UNKNOWN_VALUE - 1UL)) {
+        return FALSE;
+    }
+
+    *seconds = (DWORD)(estimatedSeconds + 0.5);
+    *calculated = TRUE;
+    return TRUE;
+}
+
+static void PrintEstimatedRuntime(
+    FILE *out,
+    const LLB_BATTERY_RECORD *record,
+    const char *label)
+{
+    DWORD seconds;
+    BOOL calculated;
+
+    if (TryGetEstimatedRuntime(record, &seconds, &calculated)) {
+        fprintf(out, "%s: ", label);
+        if (calculated) {
+            fprintf(out, "approximately ");
+        }
+        PrintRuntimeDuration(out, seconds);
+        if (calculated) {
+            fprintf(out,
+                    " (%lu seconds; calculated from current capacity and discharge rate because the driver did not provide an estimate)\n",
+                    (unsigned long)seconds);
+        } else {
+            fprintf(out, " (%lu seconds; reported by battery driver)\n",
+                    (unsigned long)seconds);
+        }
+    } else {
+        fprintf(out,
+                "%s: Not available (the driver estimate is unknown and a reliable estimate could not be calculated from the available capacity and discharge rate)\n",
+                label);
+    }
+}
+
 static void PrintBatteryInformationSection(FILE *out, const LLB_BATTERY_RECORD *record)
 {
     BOOL relativeUnits;
@@ -1044,15 +1160,7 @@ static void PrintBatteryInformationSection(FILE *out, const LLB_BATTERY_RECORD *
         fprintf(out, "Capacity reporting scales: Not reported\n");
     }
 
-    if (record->EstimatedAvailable && record->EstimatedSeconds != LLB_UNKNOWN_VALUE) {
-        fprintf(out, "Estimated remaining runtime: %lu seconds (%lu h %lu min %lu sec)\n",
-                (unsigned long)record->EstimatedSeconds,
-                (unsigned long)(record->EstimatedSeconds / 3600),
-                (unsigned long)((record->EstimatedSeconds % 3600) / 60),
-                (unsigned long)(record->EstimatedSeconds % 60));
-    } else {
-        fprintf(out, "Estimated remaining runtime: Not reported or unknown\n");
-    }
+    PrintEstimatedRuntime(out, record, "Estimated remaining runtime");
 }
 
 static void PrintRawCallStatus(
@@ -1391,15 +1499,7 @@ static void PrintSelectedFieldValue(FILE *out, const LLB_BATTERY_RECORD *record,
             fprintf(out, "%s: Not reported or unknown\n", GetFieldLabel(fieldName));
         }
     } else if (strcmp(fieldName, "estimated-runtime") == 0) {
-        if (record->EstimatedAvailable && record->EstimatedSeconds != LLB_UNKNOWN_VALUE) {
-            fprintf(out, "%s: %lu seconds (%lu h %lu min %lu sec)\n", GetFieldLabel(fieldName),
-                    (unsigned long)record->EstimatedSeconds,
-                    (unsigned long)(record->EstimatedSeconds / 3600),
-                    (unsigned long)((record->EstimatedSeconds % 3600) / 60),
-                    (unsigned long)(record->EstimatedSeconds % 60));
-        } else {
-            fprintf(out, "%s: Not reported or unknown\n", GetFieldLabel(fieldName));
-        }
+        PrintEstimatedRuntime(out, record, GetFieldLabel(fieldName));
     } else if (strcmp(fieldName, "capacity-scales") == 0) {
         if (record->ScalesAvailable) {
             scaleCount = record->ScalesBytes / sizeof(BATTERY_REPORTING_SCALE);
