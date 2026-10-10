@@ -1,4 +1,4 @@
-Low-Level Battery Info (LLB) is a small Windows battery tool written in C. It reads battery details through the Windows battery interface without WMI.
+Low-Level Battery Info (LLB) is a small Windows battery tool written in C. It reads battery details through the Windows battery interface.
 
 Run `llb.exe` to view the full report. Press `R` to refresh, `E` to export the report, or `Q` to exit. The data refresh is manual.
 
